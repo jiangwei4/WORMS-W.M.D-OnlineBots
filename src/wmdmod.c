@@ -1,21 +1,12 @@
-// WMD-Mod v73 — DLL proxy "dinput8.dll"
-// Ajoute des équipes IA (CPU) dans le lobby EN LIGNE de Worms W.M.D.
-//   F9 (hôte)  : ajoute une IA
-//   F7 (hôte)  : retire la dernière IA ajoutée
-//   F5 (hôte)  : difficulté de la dernière IA (1 → 5 → 1), affichée dans son nom
-//   F8         : écrit l'état du lobby dans wmdmod_log.txt
-//   F6         : écrit les options par joueur (suivi +0xE48) dans wmdmod_log.txt
-// Les changements d'options par joueur sont aussi notés automatiquement
-// (pour trouver l'option qui porte la difficulté de l'IA).
-// À installer chez l'hôte ET chez chaque ami.
+// WMD-Mod v74 — DLL proxy "dinput8.dll" pour Worms W.M.D (Steam)
+// Ajoute des équipes IA (CPU) dans les parties EN LIGNE, avec les éléments du lobby local du jeu :
+// bouton « Ajouter l'I.A. », sélecteur de difficulté, croix de retrait, et menu contextuel d'une IA
+// (Exclure = retirer, Couper le son = niveau +, Profil = niveau -). Seul l'hôte gère les IA.
+// L'exe n'est pas modifié : tout se fait en mémoire. À installer chez l'hôte ET chez chaque invité.
+// Compilation : voir build.bat (-DWMD_NOLOG = version sans fichier wmdmod_log.txt).
 #include <windows.h>
 #include <stdio.h>
 #include <stdint.h>
-#ifdef WMD_NOBEEP   // v71 : version finale sans bip (invite qui tente une action reservee a l hote)
-#define Beep(f, d) ((void)0)
-#endif
-// v72 : raccourcis clavier (F9/F7/F5/F8/F6/F4) retires : tout passe par les boutons du lobby (bandeau IA, Ajouter l IA)
-#define KEYDOWN(k) ((void)(k), 0)
 
 #define REF_BASE 0x7F0000u
 static uintptr_t g_base;
@@ -85,24 +76,15 @@ static void logf_(const char* fmt, ...) {
     LeaveCriticalSection(&g_logcs);
 }
 
-// ---------- v28 : fichier de réglages wmdmod.ini (créé avec les valeurs par défaut s'il manque) ----------
+// ---------- fichier de réglages wmdmod.ini (créé avec les valeurs par défaut s'il manque) ----------
 typedef struct {
-    int keyAdd, keyDel, keyLevel, keyLobby, keyOptions, keyTeams;
     int verbose;                     // 0 = log minimal, 1 = diagnostic (développement)
     unsigned long long hostSteamId;  // 0 = détection automatique de l'hôte
-    int forcePadAI;                  // essai : forcer le ver à appliquer les boutons de l'IA (hôte)
-    int injectKeys;                  // v29 : boutons de l'IA convertis en touches chez l'hôte (abandonné)
-    int swapMapper;                  // v31 : pendant le tour IA, l'hôte utilise le traducteur d'entrées de l'IA
-    int aiShared;                    // v32 : 1 = l'IA tourne sur CHAQUE PC (comme en local), 0 = sur l'hôte
-    int markLocal;                   // v33 : en mode partagé, l'entrée IA est marquée « ce PC » sur chaque PC
+    int forcePadAI;                  // tour IA en ligne : forcer le ver à appliquer les boutons de l'IA
+    int swapMapper;                  // mode hôte seul : l'hôte utilise le traducteur d'entrées de l'IA
+    int aiShared;                    // 1 = l'IA tourne sur CHAQUE PC (comme en local), 0 = sur l'hôte seul
 } cfg_t;
-static cfg_t g_cfg = { VK_F9, VK_F7, VK_F5, VK_F8, VK_F6, VK_F4, 1, 0, 1, 0, 1, 1, 1 };
-static int parse_key(const char* s, int def) {
-    if ((s[0] == 'F' || s[0] == 'f') && s[1] >= '1' && s[1] <= '9') {
-        int n = atoi(s + 1); if (n >= 1 && n <= 12) return VK_F1 + n - 1;
-    }
-    return def;
-}
+static cfg_t g_cfg = { 1, 0, 1, 1, 1 };
 static void load_ini(void) {
     char path[MAX_PATH]; snprintf(path, sizeof path, "%swmdmod.ini", g_dir);
     if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES) {
@@ -110,23 +92,17 @@ static void load_ini(void) {
         if (f) {
             fputs("; Reglages de WMD-Mod (IA en ligne pour Worms W.M.D)\n"
                   "; Ce fichier est cree automatiquement ; supprimez-le pour revenir aux valeurs par defaut.\n\n"
-                  "[Touches]\n"
-                  "; touches F1 a F12\n"
-                  "AjouterIA=F9\nRetirerIA=F7\nDifficulteIA=F5\nEtatLobby=F8\nOptionsJoueurs=F6\nEtatEquipes=F4\n\n"
                   "[Log]\n"
-                  "; 0 = journal minimal, 1 = journal de diagnostic detaille (utile pendant le developpement)\n"
+                  "; 0 = journal minimal, 1 = journal de diagnostic detaille (version avec log uniquement)\n"
                   "Detail=1\n\n"
                   "[Reseau]\n"
                   "; Laisser vide : l'hote est detecte automatiquement (proprietaire du lobby Steam).\n"
                   "; En secours : Steam ID 64 bits de l'hote, en decimal (ex. 76561198000000000).\n"
                   "HostSteamID=\n\n"
                   "[Experimental]\n"
-                  "; 1 = pendant le tour de l'IA, l'hote force le ver a appliquer les boutons de l'IA\n"
+                  "; 1 = pendant le tour de l'IA, le ver applique les boutons de l'IA\n"
                   "ForcerBoutonsIA=1\n"
-                  "; 1 = l'hote convertit les boutons de l'IA en touches (Fleches, Entree, Retour arriere, Espace)\n"
-                  ";     transmises a l'autre joueur. Ne pas toucher au clavier pendant le tour de l'IA.\n"
-                  "ToucheIA=0\n"
-                  "; 1 = pendant le tour de l'IA, l'hote enregistre et envoie les entrees de la manette virtuelle de l'IA\n"
+                  "; 1 = en mode hote seul, l'hote enregistre et envoie les entrees de la manette virtuelle de l'IA\n"
                   "TraducteurIA=1\n"
                   "; 1 = l'IA tourne sur CHAQUE PC en meme temps (comme en local, rien n'est envoye) ;\n"
                   ";     0 = seul l'hote fait jouer l'IA et envoie ses actions. Les deux PC doivent avoir la meme valeur.\n"
@@ -135,12 +111,6 @@ static void load_ini(void) {
         }
     }
     char v[64];
-    GetPrivateProfileStringA("Touches", "AjouterIA", "F9", v, sizeof v, path);      g_cfg.keyAdd = parse_key(v, VK_F9);
-    GetPrivateProfileStringA("Touches", "RetirerIA", "F7", v, sizeof v, path);      g_cfg.keyDel = parse_key(v, VK_F7);
-    GetPrivateProfileStringA("Touches", "DifficulteIA", "F5", v, sizeof v, path);   g_cfg.keyLevel = parse_key(v, VK_F5);
-    GetPrivateProfileStringA("Touches", "EtatLobby", "F8", v, sizeof v, path);      g_cfg.keyLobby = parse_key(v, VK_F8);
-    GetPrivateProfileStringA("Touches", "OptionsJoueurs", "F6", v, sizeof v, path); g_cfg.keyOptions = parse_key(v, VK_F6);
-    GetPrivateProfileStringA("Touches", "EtatEquipes", "F4", v, sizeof v, path);    g_cfg.keyTeams = parse_key(v, VK_F4);
     g_cfg.verbose = GetPrivateProfileIntA("Log", "Detail", 1, path);
 #ifdef WMD_NOLOG
     g_cfg.verbose = 0;   // version sans log : pas de diagnostic détaillé
@@ -149,7 +119,6 @@ static void load_ini(void) {
     g_cfg.hostSteamId = 0;
     for (const char* c = v; *c >= '0' && *c <= '9'; c++) g_cfg.hostSteamId = g_cfg.hostSteamId * 10 + (unsigned)(*c - '0');
     g_cfg.forcePadAI = GetPrivateProfileIntA("Experimental", "ForcerBoutonsIA", 1, path);
-    g_cfg.injectKeys = GetPrivateProfileIntA("Experimental", "ToucheIA", 0, path);
     g_cfg.swapMapper = GetPrivateProfileIntA("Experimental", "TraducteurIA", 1, path);
     g_cfg.aiShared = GetPrivateProfileIntA("Experimental", "IAPartagee", 1, path);
 }
@@ -216,13 +185,11 @@ static uint8_t* ns(void) {
 // ---------- état du mod ----------
 typedef struct { uint32_t lo; char name[24]; } cpu_t;
 static cpu_t g_remote[6]; static int g_nremote = 0;   // IA connues côté client
-static volatile LONG g_reqAddCpu = 0, g_reqDump = 0, g_reqRebuild = 0, g_reqDel = 0, g_reqOpt = 0, g_reqLvl = 0;
-#define PENDING (g_reqAddCpu || g_reqDump || g_reqRebuild || g_reqDel || g_reqOpt || g_reqLvl)
+static volatile LONG g_reqAddCpu = 0, g_reqRebuild = 0;   // ajout d'IA (bouton), reconstruction de liste (invité)
 typedef void (__fastcall *PFN_SELECT)(void*, void*, int);
 static PFN_SELECT f_select;
 static DWORD g_mainTid = 0;
 static int g_cpuCounter = 0;
-static volatile DWORD g_pumpCalls = 0, g_xiTid = 0, g_tgTid = 0;
 
 // rand() forcé pour donner un identifiant unique à l'IA créée
 typedef int (__cdecl *PFN_RAND)(void);
@@ -293,28 +260,7 @@ static uint8_t* track_obj(uint8_t* n, int i, int j) {
     uint8_t* o = *(uint8_t**)(t + T_OBJ + j * 4);
     return (o && !IsBadReadPtr(o, O_VALS + 256 * 0x28)) ? o : NULL;
 }
-static void dump_options(const char* why) {
-    uint8_t* n = ns();
-    logf_("--- options par joueur (%s)", why);
-    if (!n) { logf_("  pas de lobby"); return; }
-    for (int i = 0; i < 16; i++) {
-        uint8_t* t = n + NS_TRACK + i * 0x20;
-        if (!t[T_ACTIVE]) continue;
-        uint32_t lo = *(uint32_t*)(t + T_ID), hi = *(uint32_t*)(t + T_ID + 4);
-        logf_("  suivi[%d] id=%08X%08X nom='%.20s'", i, hi, lo, player_name(n, lo, hi));
-        for (int j = 0; j < 4; j++) {
-            uint8_t* o = track_obj(n, i, j); if (!o) continue;
-            int c, s = opt_sel(o, &c);
-            logf_("    option %08X : %d valeurs, choisie=%d '%.24s' (val=%d)", *(uint32_t*)o, c, s, opt_name(o, s),
-                  s >= 0 ? *(int*)(o + O_VALS + s * 0x28 + V_VAL) : 0);
-            for (int k = 0; k < 16; k++) {
-                uint8_t* v = o + O_VALS + k * 0x28; if (!v[V_ACTIVE]) continue;
-                logf_("       [%d] '%.24s' val=%d", k, opt_name(o, k), *(int*)(v + V_VAL));
-            }
-        }
-    }
-}
-// Note automatiquement tout changement d'option (2 fois par seconde)
+// Diagnostic : note tout changement d'option par joueur (2 fois par seconde)
 static uint32_t g_wId[16]; static int g_wSel[16][4]; static int g_wInit = 0; static DWORD g_wLast = 0;
 static void watch_options(void) {
     DWORD now = GetTickCount();
@@ -343,13 +289,11 @@ static void watch_options(void) {
 #define NS_UI_LIST_ACK  0xC8
 #define NS_UI_PLAYER    0xB5
 #define NS_UI_PLAYER_ACK 0xBB
-// v49 : NetSetup::Update (0xB851F0) remet les indicateurs « liste/joueur modifiés » à 0 à chaque passage ;
-// un seul passage à 1 peut être effacé avant que l'écran ne le lise. On les maintient donc levés pendant
-// 1,5 s après chaque changement (client : IA annoncée ; hôte : F9/F5/F7).
+// NetSetup::Update (0xB851F0) remet les indicateurs « liste/joueur modifiés » à 0 à chaque passage : on les
+// maintient levés pendant 1,5 s après chaque changement (ajout, niveau, retrait, IA annoncée chez l'invité).
 static volatile DWORD g_uiPulseUntil = 0;
-// v54 : bascule automatique « joueur distant » des lignes IA pendant 0,3 s (comme deux appuis sur F3) :
-// la ligne existe en deux variantes (MNU_LocalPlayer_N / MNU_NetworkPlayer_N) ayant chacune leur
-// TXT_PlayerName_N ; changer de variante fait relire le nom et l'équipe (le nom n'a pas de moniteur).
+// Une ligne existe en deux variantes (MNU_LocalPlayer_N / MNU_NetworkPlayer_N), chacune avec son
+// TXT_PlayerName_N : basculer brièvement une ligne IA en variante distante fait relire son nom (voir h_islocal).
 static volatile DWORD g_flipFrom = 0, g_flipUntil = 0;
 static void ui_pulse(void) {
     DWORD now = GetTickCount();
@@ -361,13 +305,12 @@ static void ui_pulse_pump(uint8_t* n) {
     if ((LONG)(GetTickCount() - g_uiPulseUntil) > 0) { g_uiPulseUntil = 0; return; }
     n[NS_UI_LIST] = 1; n[NS_UI_LIST_ACK] = 0;
     for (int i = 0; i < 6; i++) { n[NS_UI_PLAYER + i] = 1; n[NS_UI_PLAYER_ACK + i] = 0; }
-    // v51 : moniteur d'interface « Player List Changed » (0x2AFA000B, 0x8BDA10 -> 0xB809F0) : indicateur
-    // +0x13C4, acquitté par l'écran en +0x13C5, effacé par NetSetup::Update (0xB85248). Le jeu le lève en
-    // écrivant le mot 1 (0xB8EFFE). C'est lui qui fait reconstruire les lignes de joueurs.
+    // moniteur d'interface « Player List Changed » (0x2AFA000B, 0x8BDA10 -> 0xB809F0) : indicateur +0x13C4,
+    // acquitté par l'écran en +0x13C5, effacé par NetSetup::Update (0xB85248) ; il fait reconstruire les lignes.
     *(uint16_t*)(n + 0x13C4) = 1;
-    // v55 : la liste des lignes SB_OnlinePlayers (donnée 0x2EE200AD = 0x8D9C20, nombre de joueurs) surveille
-    // « Has Lobby Match Data Changed » (0x2AFA0003 -> 0x8BD860) : vrai si [0xE4C6E6C]+0x2E (consommé) ou si
-    // NetSetup+0xCF (0xB82920(0)). C'est ce signal qui fait recompter/recréer les lignes.
+    // la liste des lignes SB_OnlinePlayers (donnée 0x2EE200AD = 0x8D9C20, nombre de joueurs) surveille « Has
+    // Lobby Match Data Changed » (0x2AFA0003 -> 0x8BD860) : vrai si [0xE4C6E6C]+0x2E (consommé) ou si
+    // NetSetup+0xCF (0xB82920(0)). C'est ce signal qui fait recompter/recréer les lignes (indispensable chez l'invité).
     n[0xCF] = 1; n[0xD4] = 0;   // comme le jeu (0xB84F7E) ; effacé par Update (0xB85492) une fois acquitté
     static DWORD lastG = 0;
     if (GetTickCount() - lastG > 200) {
@@ -386,10 +329,9 @@ static void ui_notify(uint8_t* n, uint32_t lo, uint32_t hi) {
     }
 }
 
-// v43 : comme le lobby local (0x8E8DB0) : après AddCpuSlot, l'IA reçoit une équipe CPU prédéfinie
-// (gestionnaire [0xE4C6AFC] via 0xBA77B0, nombre 0xBA7850, i-ème fiche de 0xC8 octets 0xBA7990) :
-// copie 0xBDA1E0, vidage des récompenses 0xB93D30(+0x90), SetLobbyOptionTeam 0xB8C150(slot, 0, &fiche),
-// destruction 0xBDA8C0. Sans ça, l'option équipe valait la 1re équipe de l'hôte (même nom, mêmes vers).
+// Comme le lobby local (0x8E8DB0) : après AddCpuSlot, l'IA reçoit une équipe CPU prédéfinie (gestionnaire
+// [0xE4C6AFC] via 0xBA77B0, nombre 0xBA7850, i-ème fiche de 0xC8 octets 0xBA7990) : copie 0xBDA1E0, vidage
+// des récompenses 0xB93D30(+0x90), SetLobbyOptionTeam 0xB8C150(slot, 0, &fiche), destruction 0xBDA8C0.
 typedef void* (__cdecl *PFN_CPUMGR)(void);
 typedef int   (__fastcall *PFN_THISINT)(void*, void*);
 typedef void* (__fastcall *PFN_CPUTEAM)(void*, void*, int);
@@ -412,7 +354,7 @@ static void assign_cpu_team(uint8_t* n, int slot, int ordinal, const char* label
     memset(buf, 0, sizeof buf);
     ((PFN_TCOPY)VA(0xBDA1E0))(buf, 0, rec);
     ((PFN_THISVOID)VA(0xB93D30))(buf + 0x90, 0);
-    if (label) {   // v44 : nom de l'équipe en partie = « [IA1] Niv 3 » (+0 nom, +8 nom affiché s'il existe)
+    if (label) {   // nom de l'équipe = « [IA1] Niv 3 » (+0 nom, +8 nom affiché s'il existe)
         f_fmt(buf, "%s", label);
         const char* alt; memcpy(&alt, buf + 8, sizeof alt);
         if (alt && !IsBadReadPtr(alt, 1) && alt[0]) f_fmt(buf + 8, "%s", label);
@@ -423,8 +365,8 @@ static void assign_cpu_team(uint8_t* n, int slot, int ordinal, const char* label
     ((PFN_THISVOID)VA(0xBDA8C0))(buf, 0);
 }
 
-// Hôte : retire la dernière IA ajoutée par le mod
-static void remove_cpu(uint8_t* n, uint32_t target) {   // v60 : target = id de l'IA, 0 = la dernière
+// Hôte : retire une IA du mod (target = son id, 0 = la dernière ajoutée)
+static void remove_cpu(uint8_t* n, uint32_t target) {
     uint8_t* best = NULL;
     for (int i = 0; i < 6; i++) {
         uint8_t* s = n + NS_LOCAL + i * 0x18;
@@ -432,9 +374,9 @@ static void remove_cpu(uint8_t* n, uint32_t target) {   // v60 : target = id de 
         if (!s[E_ACTIVE] || !s[E_AI] || !IS_MAGIC(lo, hi)) continue;
         if (target ? lo == target : (!best || lo > *(uint32_t*)(best + E_ID))) best = s;
     }
-    if (!best) { logf_("F7 : aucune IA du mod a retirer"); return; }
+    if (!best) { logf_("[retrait IA] aucune IA du mod a retirer"); return; }
     uint32_t lo = *(uint32_t*)(best + E_ID);
-    logf_("F7 : retrait de '%.20s' (id %08X)", safe_str(*(const char**)(best + E_NAME)), lo);
+    logf_("[retrait IA] '%.20s' (id %08X)", safe_str(*(const char**)(best + E_NAME)), lo);
     best[E_ACTIVE] = 0;                       // nom laissé en place : le jeu le libère à la réutilisation
     uint8_t* v = list_find(n, lo, MAGIC_HI);
     if (v) v[E_ACTIVE] = 0;
@@ -442,7 +384,7 @@ static void remove_cpu(uint8_t* n, uint32_t target) {   // v60 : target = id de 
     o_rebuild(n, 0);
     ui_notify(n, 0, 0);
     for (int i = 0; i < 6; i++) { n[NS_UI_PLAYER + i] = 1; n[NS_UI_PLAYER_ACK + i] = 0; }  // les lignes ont bougé
-    dump_lists("F7");
+    dump_lists("retrait IA");
 }
 
 // ---------- difficulté ----------
@@ -459,41 +401,23 @@ static int cpu_level(uint8_t* n, uint32_t lo) {   // 1..5, 0 si inconnu
     return o ? opt_sel(o, NULL) + 1 : 0;
 }
 
-static void cpu_label(char* out, size_t sz, uint32_t lo, int lvl);   // v44 (défini plus bas)
-static void apply_cpu_team(uint8_t* n, uint32_t lo, const char* why);   // v45 (défini plus bas)
-static void relabel_cpu_team(uint8_t* n, uint32_t lo, const char* why);   // v52 (défini plus bas)
-static volatile LONG g_showLevels = 0;   // v53 : par défaut liste déroulante normale ; F3 = voir les niveaux
-static uint8_t* g_labelNs;
-// Hôte : fait défiler la difficulté de la dernière IA ajoutée
-static void step_cpu_level(uint8_t* n, uint32_t target, int delta);
-static void cycle_cpu_level(uint8_t* n, uint32_t target) { step_cpu_level(n, target, 0); }
-// v61 : delta 0 = suivant en boucle (F5), +1 / -1 = bornés à 1..5 (boutons Niv + / Niv -)
-static void step_cpu_level(uint8_t* n, uint32_t target, int delta) {
-    uint32_t best = target;
-    for (int i = 0; i < 6 && !target; i++) {
-        uint8_t* s = n + NS_LOCAL + i * 0x18;
-        uint32_t lo = *(uint32_t*)(s + E_ID), hi = *(uint32_t*)(s + E_ID + 4);
-        if (s[E_ACTIVE] && s[E_AI] && IS_MAGIC(lo, hi) && lo > best) best = lo;
-    }
-    if (!best) { logf_("F5 : aucune IA du mod"); return; }
-    uint8_t* o = cpu_diff_obj(n, best);
-    if (!o) { logf_("F5 : options de l'IA %08X introuvables", best); return; }
+static void cpu_label(char* out, size_t sz, uint32_t lo, int lvl);   // défini plus bas
+// Hôte : niveau d'une IA +1 / -1, borné à 1..5 (Couper le son = Niv +, Profil = Niv -)
+static void step_cpu_level(uint8_t* n, uint32_t lo, int delta) {
+    uint8_t* o = cpu_diff_obj(n, lo);
+    if (!o) { logf_("[niveau IA] options de l'IA %08X introuvables", lo); return; }
     int c, s = opt_sel(o, &c);
     if (c <= 0) return;
-    int ns_ = delta == 0 ? (s + 1) % c : s + delta;
+    int ns_ = s + delta;
     if (ns_ < 0) ns_ = 0;
     if (ns_ > c - 1) ns_ = c - 1;
     if (ns_ == s) return;
     f_select(o, 0, ns_);
-    ui_notify(n, best, MAGIC_HI);
-    logf_("F5 : IA %08X difficulte %d -> %d", best, s + 1, ns_ + 1);
-    if (g_showLevels) relabel_cpu_team(n, best, "F5");   // v53 : seulement en mode niveaux (le nom en jeu vient de v48)
+    ui_notify(n, lo, MAGIC_HI);
+    logf_("[niveau IA] IA %08X difficulte %d -> %d", lo, s + 1, ns_ + 1);
 }
 
-// v40 : nom affiché des IA dans le lobby en ligne (il n'y a pas de bandeau IA dans cet écran) :
-// « [IA2] Earthworm 3/5 » = numéro de l'IA, personnage IA du jeu (0xBF9016) et difficulté.
-static const char* const CPU_CHAR[5] __attribute__((unused)) = { "Ringworm", "Flatworm", "Earthworm", "Tapeworm", "Graboid" };
-// v44 : « [IA1] Niv 3 » (numéro = rang parmi les IA actives, 1..6)
+// Nom des IA : « [IA1] Niv 3 » (numéro = rang parmi les IA actives, 1..6)
 static int cpu_rank(uint8_t* n, uint32_t lo) {
     uint32_t ids[16]; int c = 0;
     for (int L = 0; L < 2 && n; L++)
@@ -516,13 +440,12 @@ static void cpu_label(char* out, size_t sz, uint32_t lo, int lvl) {      // nom 
     snprintf(out, sz, "[IA%d] Niv %d", cpu_rank(g_labelNs, lo), lvl);
 }
 static int cpu_level(uint8_t* n, uint32_t lo);
-static void cpu_rowname(char* out, size_t sz, uint32_t lo) {             // v47 : « [IA1] Niv 3 » (lu au 1er affichage)
+static void cpu_rowname(char* out, size_t sz, uint32_t lo) {             // « [IA1] Niv 3 » (lu au 1er affichage)
     int lv = g_labelNs ? cpu_level(g_labelNs, lo) : 0;
     snprintf(out, sz, "[IA%d] Niv %d", cpu_rank(g_labelNs, lo), lv ? lv : 3);
 }
-// v45 : SetLobbyOptionTeam (0xB8C150) compte dans la LISTE VISIBLE (+0xD30), pas dans la liste locale renvoyée
-// par AddCpuSlot (en v43/v44 l'équipe partait sur la ligne de l'ami). On attend que l'IA soit dans la liste
-// visible, puis on lui donne sa fiche CPU.
+// SetLobbyOptionTeam (0xB8C150) compte dans la LISTE VISIBLE (+0xD30), pas dans la liste locale renvoyée par
+// AddCpuSlot : on attend que l'IA soit dans la liste visible, puis on lui donne sa fiche CPU.
 static int vis_index(uint8_t* n, uint32_t lo) {
     for (int i = 0; i < 6; i++) {
         uint8_t* e = n + NS_LIST + i * 0x18;
@@ -530,63 +453,12 @@ static int vis_index(uint8_t* n, uint32_t lo) {
     }
     return -1;
 }
-// v52 : renomme l'équipe ACTUELLEMENT choisie pour l'IA (sans la remplacer) : 0xB802A0(fiche, ligne, 0)
-// (thiscall ret 0xC, construit la fiche depuis l'option équipe), titre « [IAk] Niv n », SetLobbyOptionTeam.
-typedef void (__fastcall *PFN_GETTEAM)(void*, void*, void*, int, int);
-// v57 : le nom réel de l'équipe (ex. « Teamsters ») est mémorisé avant d'afficher « [IAk] Niv n » (mode niveaux,
-// F3) et remis au retour en mode normal : l'invité, qui voit le nom de la fiche, ne garde pas le libellé.
-static char g_origTitle[8][64];
-static void set_cpu_title(uint8_t* n, uint32_t lo, int restore, const char* why) {
-    int vi = vis_index(n, lo);
-    if (vi < 0) return;
-    int k = (int)(lo & 0xFF) % 8;
-    char lb[64];
-    static uint8_t buf[0x200];
-    memset(buf, 0, sizeof buf);
-    ((PFN_GETTEAM)VA(0xB802A0))(n, 0, buf, vi, 0);
-    const char *t0, *t8; memcpy(&t0, buf, sizeof t0); memcpy(&t8, buf + 8, sizeof t8);
-    const char* cur = (t8 && !IsBadReadPtr(t8, 1) && t8[0]) ? t8 : (t0 && !IsBadReadPtr(t0, 1) ? t0 : "");
-    if (restore) {
-        if (!g_origTitle[k][0]) { ((PFN_THISVOID)VA(0xBDA8C0))(buf, 0); return; }
-        snprintf(lb, sizeof lb, "%s", g_origTitle[k]);
-    } else {
-        if (strncmp(cur, "[IA", 3)) snprintf(g_origTitle[k], sizeof g_origTitle[k], "%s", cur);   // nom réel
-        g_labelNs = n;
-        int lv = cpu_level(n, lo); if (!lv) lv = 3;
-        cpu_label(lb, sizeof lb, lo, lv);
-    }
-    f_fmt(buf, "%s", lb);
-    if (t8 && !IsBadReadPtr(t8, 1) && t8[0]) f_fmt(buf + 8, "%s", lb);
-    ((PFN_SETTEAM)VA(0xB8C150))(n, 0, vi, 0, buf);
-    ((PFN_THISVOID)VA(0xBDA8C0))(buf, 0);
-    logf_("IA %08X : nom d'equipe -> '%s' (ligne visible %d, %s)", lo, lb, vi, why);
-}
-static void relabel_cpu_team(uint8_t* n, uint32_t lo, const char* why) { set_cpu_title(n, lo, 0, why); }
-static void restore_cpu_teams(uint8_t* n, const char* why) {
-    for (int i = 0; i < 6; i++) {
-        uint8_t* e = n + NS_LIST + i * 0x18;
-        uint32_t lo = *(uint32_t*)(e + E_ID), hi = *(uint32_t*)(e + E_ID + 4);
-        if (e[E_ACTIVE] && e[E_AI] && IS_MAGIC(lo, hi)) set_cpu_title(n, lo, 1, why);
-    }
-}
-static void relabel_all_cpus(uint8_t* n, const char* why) {
-    for (int i = 0; i < 6; i++) {
-        uint8_t* e = n + NS_LIST + i * 0x18;
-        uint32_t lo = *(uint32_t*)(e + E_ID), hi = *(uint32_t*)(e + E_ID + 4);
-        if (e[E_ACTIVE] && e[E_AI] && IS_MAGIC(lo, hi)) relabel_cpu_team(n, lo, why);
-    }
-}
-static volatile LONG g_reqRelabel = 0;
 static uint32_t g_pendTeam[8];   // ids d'IA en attente de leur fiche
 static void apply_cpu_team(uint8_t* n, uint32_t lo, const char* why) {
     int vi = vis_index(n, lo);
     if (vi < 0) return;
-    g_labelNs = n;
-    int lv = cpu_level(n, lo); if (!lv) lv = 3;
-    char lb[32]; cpu_label(lb, sizeof lb, lo, lv);
     logf_("IA %08X : fiche CPU sur la ligne visible %d (%s)", lo, vi, why);
-    assign_cpu_team(n, vi, (int)(lo & 0xFF) - 1, NULL);   // v57 : vrai nom d'équipe (le nom en jeu vient de v48)
-    (void)lb;
+    assign_cpu_team(n, vi, (int)(lo & 0xFF) - 1, NULL);   // vrai nom d'équipe ; le nom en partie vient de h_settitle
 }
 static void pending_cpu_teams(uint8_t* n) {
     for (int k = 0; k < 8; k++) {
@@ -612,7 +484,7 @@ static void refresh_cpu_names(uint8_t* n) {
             if (cur && !IsBadReadPtr(cur, 1) && !strcmp(cur, want)) continue;
             f_fmt(e + E_NAME, "%s", want);
             ui_notify(n, lo, hi);
-            ui_pulse();   // v56 : nom changé (F5 chez l'hôte, options reçues chez le client) -> écran prévenu
+            ui_pulse();   // nom changé (niveau chez l'hôte, options reçues chez l'invité) -> écran prévenu
             if (g_nmId[k] != lo || g_nmLvl[k] != lvl) {
                 g_nmId[k] = lo; g_nmLvl[k] = lvl;
                 logf_("IA %08X : nom -> '%s'", lo, want);
@@ -787,11 +659,6 @@ extern volatile LONG g_inGameOnline, g_isHostCached;
 #define RET_AISTART 0xC5F46B   // 0xC5F2D0 (état 7) : si IsTeamCPU → démarre l'IA de CE PC
 #define RET_TURNSTART 0xC60833 // 0xC607F0 (début de tour) : IsTeamCPU de l'équipe qui va jouer
 volatile LONG g_turnIsCPU = 0;
-// v23 mode B (F3, à activer sur les DEUX PC) : l'équipe IA est traitée par la logique de tour comme
-// une équipe HUMAINE de la machine de l'hôte. Client : IsTeamCPU = 0 partout. Hôte : IsTeamCPU = 0
-// pour la logique de tour (TurnLogic), mais 1 au démarrage de l'IA (0xC5F46B) et pour le code de l'IA.
-volatile LONG g_modeB = 0;
-static const uint32_t TURNLOGIC_CALLERS[] = { 0xC60833, 0xC60F87, 0xC60D6B, 0xC612CA, 0xC30E06, 0xD9B7CC, 0xC609FE };
 volatile LONG g_aiTurnLog = 0;
 static char __cdecl h_isteamcpu(uint32_t team) {
     char r = o_isteamcpu(team);
@@ -804,12 +671,7 @@ static char __cdecl h_isteamcpu(uint32_t team) {
         InterlockedDecrement(&g_aiTurnLog);
         logf_("[tour] IsTeamCPU(%u) <- %08X", team, (unsigned)rr);
     }
-    if (r && g_modeB && g_inGameOnline) {
-        int tl = 0;
-        for (unsigned i = 0; i < sizeof TURNLOGIC_CALLERS / sizeof TURNLOGIC_CALLERS[0]; i++) if (rr == TURNLOGIC_CALLERS[i]) tl = 1;
-        if (!g_isHostCached || (tl && rr != RET_AISTART)) return 0;
-    }
-    // v20 : chez le client en ligne, l'IA ne doit pas jouer localement : c'est l'hôte qui la joue
+    // mode hôte seul (IAPartagee=0) : chez l'invité, l'IA n'est pas lancée, l'hôte la joue
     if (!g_cfg.aiShared && r && g_inGameOnline && !g_isHostCached && (uintptr_t)ra == VA(RET_AISTART)) {
         logf_("[tour] client : IA de l'equipe %u NON lancee ici (l'hote la joue)", team);
         return 0;
@@ -825,26 +687,20 @@ static uint64_t __fastcall h_getid(void* c, void* d, uint32_t i) {
 static uint64_t __fastcall h_getlocalid(void* c, void* d) {
     uint64_t r = o_getlocalid(c, d); spy(2, __builtin_return_address(0), 0, (uint32_t)r); return r;
 }
-// v52 : dans l'écran en ligne, le nom de ligne (TXT_PlayerName_N, donnée 0x2EE200D2 = 0x8E2520) n'a AUCUN
-// moniteur : il n'est lu qu'à l'apparition de la ligne. La colonne équipe (TXT_TeamName_N) surveille « Lobby
-// Player List Changed ». En mode niveaux, une ligne IA est présentée comme un joueur distant : sa colonne équipe
-// montre « [IAk] Niv n » et suit F5 ; en mode équipes, c'est la liste déroulante normale.
-
 static char __fastcall h_islocal(void* c, void* d, uint32_t i) {
     char r = o_islocal(c, d, i); spy(3, __builtin_return_address(0), i, (uint8_t)r);
-    // v46 : activateur d'interface « I am the local player » (0x8BE7C0, appel 0xB83440 en 0x8BE822) : une
-    // ligne IA est affichée comme un joueur distant. Sa colonne équipe montre alors le nom de la fiche
-    // (« [IA1] Niv 3 », mis à jour par F5) au lieu du sélecteur d'équipes local de l'hôte (« Teamsters »).
-    // v52 : seulement en « mode niveaux » (F3 bascule ; l'autre mode rend la liste déroulante d'équipe).
-    // v60 : activateur « Lobby Mute Button » (0x8BFE70 -> IsLocal en 0x8BFE98) : une ligne IA compte comme
-    // distante pour que « Muet » (= niveau +) apparaisse dans son menu.
+    // Activateur « Lobby Mute Button » (0x8BFE70 -> IsLocal en 0x8BFE98) : une ligne IA compte comme
+    // distante pour que « Couper le son » (= niveau +) apparaisse dans son menu.
     if (r && i < 6 && (uintptr_t)__builtin_return_address(0) == VA(0x8BFE9D)) {
         uint8_t* e = (uint8_t*)c + NS_LIST + i * 0x18;
         if (e[E_AI] && IS_MAGIC(*(uint32_t*)(e + E_ID), *(uint32_t*)(e + E_ID + 4))) return 0;
     }
+    // Activateur « I am the local player » (0x8BE7C0, appel 0xB83440 en 0x8BE822) : pendant 0,3 s après un
+    // changement (ui_pulse), une ligne IA passe en variante « joueur distant » puis revient, ce qui fait
+    // relire son nom (TXT_PlayerName_N n'a pas de moniteur).
     DWORD now_ = GetTickCount();
     int flip = g_flipUntil && (LONG)(now_ - g_flipFrom) >= 0 && (LONG)(now_ - g_flipUntil) < 0;
-    if ((g_showLevels || flip) && r && i < 6 && (uintptr_t)__builtin_return_address(0) == VA(0x8BE827)) {
+    if (flip && r && i < 6 && (uintptr_t)__builtin_return_address(0) == VA(0x8BE827)) {
         uint8_t* e = (uint8_t*)c + NS_LIST + i * 0x18;
         if (e[E_AI] && IS_MAGIC(*(uint32_t*)(e + E_ID), *(uint32_t*)(e + E_ID + 4))) return 0;
     }
@@ -856,10 +712,10 @@ static char __fastcall h_isai(void* c, void* d, uint32_t i) {
 static int __fastcall h_findidx(void* c, void* d, uint32_t lo, uint32_t hi) {
     int r = o_findidx(c, d, lo, hi); spy(5, __builtin_return_address(0), lo, r); return r;
 }
-// v48 : au lancement (hôte), le constructeur des équipes de la partie (0xBF8F90 / 0xBF7500) écrit le titre
-// de l'équipe du joueur i avec 0xAE2D10(i, drapeau, XString* nom) (cdecl). Pour un joueur IA du mod, on
-// réécrit ce titre en « [IAk] Niv n », quelle que soit l'équipe choisie dans le lobby (apparence et vers
-// conservés). Les équipes sont ensuite envoyées telles quelles au client.
+// Au lancement (hôte), le constructeur des équipes de la partie (0xBF8F90 / 0xBF7500) écrit le titre de
+// l'équipe du joueur i avec 0xAE2D10(i, drapeau, XString* nom) (cdecl). Pour un joueur IA du mod, on réécrit
+// ce titre en « [IAk] Niv n », quelle que soit l'équipe choisie dans le lobby (apparence et vers conservés).
+// Les équipes sont ensuite envoyées telles quelles aux invités.
 typedef void (__cdecl *PFN_SETTITLE)(uint32_t, uint32_t, void*);
 static PFN_SETTITLE o_settitle;
 static void __cdecl h_settitle(uint32_t team, uint32_t flag, void* name) {
@@ -870,7 +726,7 @@ static void __cdecl h_settitle(uint32_t team, uint32_t flag, void* name) {
     if (!n || !o_getid || team >= 6) return;
     uint64_t id = o_getid(n, 0, team);
     uint32_t lo = (uint32_t)id, hi = (uint32_t)(id >> 32);
-    {   // v59 (diagnostic) : qui reçoit quelle fiche au lancement
+    {   // diagnostic : qui reçoit quelle fiche au lancement
         const char* nm = name ? *(const char**)name : NULL;
         if (team == 0) dump_lists("construction des equipes");
         logf_("[equipes] lancement : equipe %u <- joueur id %08X%08X '%.24s', fiche '%.24s'", team, hi, lo,
@@ -883,10 +739,11 @@ static void __cdecl h_settitle(uint32_t team, uint32_t flag, void* name) {
     f_fmt((void*)(VA(0x58BA4E8) + team * 0xD98), "%s", lb);
     logf_("[equipes] joueur %u (IA %08X) : titre d'equipe -> '%s'", team, lo, lb);
 }
-// v60 : menu contextuel d'un joueur du lobby en ligne (BTN_Player_N) utilisé pour les IA :
+// Menu contextuel d'un joueur du lobby en ligne (BTN_Player_N), détourné pour les lignes IA :
 //  « Expulser » (champ Kick 0x2EE2020E -> 0x8E2CD0 -> NetSetup::Kick 0xB83990(ligne)) = retirer CETTE IA ;
-//    le bouton n'apparaît que si hôte && 0xB83200(ligne) == 0 (activateur 0x8BFE00) -> 0 pour une IA.
-//  « Muet » (champ Mute 0x2EE2020F -> 0x8E2D20 -> 0xB8C7E0(ligne, état)) = niveau + (1..5 en boucle).
+//    le bouton n'apparaît que si hôte && 0xB83200(ligne) == 0 (activateur 0x8BFE00) -> forcé à 0 pour une IA.
+//  « Couper le son » (champ Mute 0x2EE2020F -> 0x8E2D20 -> 0xB8C7E0(ligne, état)) = niveau +.
+//  « Profil » (champ 0x2EE20232 -> 0x8D2430) = niveau -.
 // Les actions sont mises en file et exécutées par pump() dans le thread logique.
 static volatile LONG g_reqKickLo = 0, g_reqUpLo = 0, g_reqDownLo = 0;
 static uint32_t ai_at_row(void* ns_, uint32_t i) {
@@ -904,22 +761,20 @@ static void __fastcall h_kick(void* c, void* d, uint32_t i) {
     if (lo) { logf_("[menu] Expulser sur l'IA %08X (ligne %u) -> retrait", lo, i); InterlockedExchange(&g_reqKickLo, (LONG)lo); return; }
     o_kick(c, d, i);
 }
-static void set_menu_labels(int ai);
 static char __fastcall h_isself(void* c, void* d, uint32_t i) {
-    // v61b : textes du menu inchangés
     if (ai_at_row(c, i)) return 0;   // bouton Expulser visible sur une ligne IA
     return o_isself(c, d, i);
 }
 static void __fastcall h_setmute(void* c, void* d, uint32_t i, uint32_t st) {
     uint32_t lo = ai_at_row(c, i);
     if (lo) {
-        if (!f_ishost()) { Beep(330, 200); return; }
+        if (!f_ishost()) return;   // seul l'hôte change le niveau
         logf_("[menu] Muet sur l'IA %08X (ligne %u) -> niveau +", lo, i);
         InterlockedExchange(&g_reqUpLo, (LONG)lo); return;
     }
     o_setmute(c, d, i, st);
 }
-// v61 : « Profil » (champ Open Platform Profile 0x2EE20232 -> 0x8D2430, cdecl(widget, ?), ligne = mot
+// « Profil » (champ Open Platform Profile 0x2EE20232 -> 0x8D2430, cdecl(widget, ?), ligne = mot
 // widget+0x81C - 1, clic = widget+0x2888 & 1) sur une IA = niveau -.
 typedef int (__cdecl *PFN_FIELDCB)(void*, void*);
 static PFN_FIELDCB o_profile;
@@ -930,55 +785,21 @@ static int __cdecl h_profile(void* w, void* x) {
         uint32_t lo = row ? ai_at_row(n, row - 1) : 0;
         if (lo) {
             if (*((uint8_t*)w + 0x2888) & 1) {
-                if (!f_ishost()) Beep(330, 200);
-                else { logf_("[menu] Profil sur l'IA %08X (ligne %u) -> niveau -", lo, row - 1); InterlockedExchange(&g_reqDownLo, (LONG)lo); }
+                if (f_ishost()) { logf_("[menu] Profil sur l'IA %08X (ligne %u) -> niveau -", lo, row - 1); InterlockedExchange(&g_reqDownLo, (LONG)lo); }
             }
             return 1;
         }
     }
     return o_profile(w, x);
 }
-// v61 : textes du menu pour une ligne IA : dans la table de traduction chargée (AllTextFra.bin), « Couper le
-// son » -> « Niv + » et « Profil » -> « Niv - » pendant que le menu est sur une IA, remis sinon.
-static char* g_lblProfil = NULL; static char* g_lblMute[4]; static int g_nMute = 0, g_lblAI = -1;
-static volatile LONG g_lblScanned = 0;
-static void scan_labels(void) {   // thread du mod : recherche dans la mémoire du processus
-    static const char kProf[] = "Choisir une touche\0Profil\0";
-    static const char kMute[] = "\0Couper le son\0";
-    MEMORY_BASIC_INFORMATION mbi; uint8_t* a = (uint8_t*)0x10000;
-    while (a < (uint8_t*)0x7FFE0000 && VirtualQuery(a, &mbi, sizeof mbi)) {
-        uint8_t* b = (uint8_t*)mbi.BaseAddress; size_t sz = mbi.RegionSize;
-        if (mbi.State == MEM_COMMIT && mbi.Type == MEM_PRIVATE && (mbi.Protect & (PAGE_READWRITE)) && !(mbi.Protect & PAGE_GUARD) && sz < 0x10000000) {
-            for (size_t i = 0; i + sizeof kProf < sz; i++) {
-                if (b[i] == 'C' && !memcmp(b + i, kProf, sizeof kProf - 1)) {
-                    g_lblProfil = (char*)b + i + 19;   // après « Choisir une touche\0 »
-                    uint8_t* lo_ = b, *hi_ = b + sz;   // « Couper le son » dans la même table
-                    for (uint8_t* q = lo_; q + sizeof kMute < hi_ && g_nMute < 4; q++)
-                        if (q[1] == 'C' && !memcmp(q, kMute, sizeof kMute - 1)) g_lblMute[g_nMute++] = (char*)q + 1;
-                    break;
-                }
-            }
-        }
-        if (g_lblProfil) break;
-        a = b + sz;
-    }
-    logf_("[menu] textes : Profil %p, Couper le son x%d", g_lblProfil, g_nMute);
-}
-static void set_menu_labels(int ai) {
-    if (ai == g_lblAI || !g_lblProfil) return;
-    g_lblAI = ai;
-    DWORD old;
-    if (VirtualProtect(g_lblProfil, 8, PAGE_READWRITE, &old)) memcpy(g_lblProfil, ai ? "Niv -\0" : "Profil", 6);
-    for (int k = 0; k < g_nMute; k++) {
-        if (ai) memcpy(g_lblMute[k], "Niv +\0", 6); else memcpy(g_lblMute[k], "Couper", 6);
-    }
-}
 
-// ---------- v62 : vrai bandeau IA dans le lobby en ligne ----------
+// ---------- bandeau IA du lobby local dans le lobby en ligne ----------
 // Les écrans sont des JSON (wads/uidata_0.wad) analysés au chargement : 0x830FA0 lit le fichier, copie le
 // texte puis appelle le lecteur JSON 0x7F6CC0(lecteur, texte) (thiscall ret 4, retour 0x8310CD). Pour
-// WMD_OnlineLobby.bkm on insère au début de "list" le sous-arbre MNU_AI_0N + BTN_RemovePlayer du lobby local
-// (généré hors ligne par mkbanner.py -> banner_frag.h), rattaché à MNU_LocalPlayer_0N, et on relève loopMax.
+// WMD_OnlineLobby.bkm on insère au début de "list" les éléments du lobby local (sélecteur de niveau MNU_AI_0N,
+// croix BTN_RemovePlayer, bouton MNU_OfflineAddAI_0N), générés hors ligne par mkbanner.py -> banner_frag.h,
+// et on relève loopMax. Les ids injectés ont un mot bas unique < 0x270F : la scène indexe ses éléments par
+// ce mot bas dans une table de 9999 entrées (0x84EB20) ; hors table, ni clic ni DataParent.
 #include "banner_frag.h"
 typedef int (__fastcall *PFN_JSONPARSE)(void*, void*, const char*);
 static PFN_JSONPARSE o_jsonparse;
@@ -997,7 +818,7 @@ static int __fastcall h_jsonparse(void* rd, void* edx, const char* txt) {
     memcpy(out + o, BANNER_FRAG, f); o += f; out[o++] = ',';
     memcpy(out + o, txt + a, n - a); o += n - a; out[o] = 0;
     // loopMax : "loopMax" : NNNN -> BANNER_LOOPMAX (même longueur ou plus courte, on complète par des espaces)
-    // v63 : le loopMax de l'écran est le DERNIER "loopMax" du texte (les éléments en ont aussi, valeur 1)
+    // le loopMax de l'écran est le DERNIER "loopMax" du texte (les éléments en ont aussi, valeur 1)
     char* lm2 = NULL;
     for (char* q = out + o - 9; q > out; q--) if (*q == '"' && !memcmp(q, "\"loopMax\"", 9)) { lm2 = q; break; }
     if (lm2) {
@@ -1033,15 +854,14 @@ static int __cdecl h_fremove(void* w, void* x) {
         field_log("croix", w);
         if (lo) {
             if ((*((uint8_t*)w + 0x2888) & 1)) {
-                if (!f_ishost()) Beep(330, 200);
-                else { logf_("[bandeau] croix sur l'IA %08X -> retrait", lo); InterlockedExchange(&g_reqKickLo, (LONG)lo); }
+                if (f_ishost()) { logf_("[bandeau] croix sur l'IA %08X -> retrait", lo); InterlockedExchange(&g_reqKickLo, (LONG)lo); }
             }
             return 1;
         }
     }
     return o_fremove(w, x);
 }
-// v65 : les champs du sélecteur local sortent si IsOnlineSessionRunning (0xB833B0). Pour une ligne IA en ligne :
+// Les champs du sélecteur local sortent si IsOnlineSessionRunning (0xB833B0). Pour une ligne IA en ligne :
 //  - liste (0x8EB550) et choix d'un élément (0x8EB680, type élément [0xF8F5D7C]) : appel de l'original avec
 //    « hors ligne » simulé (h_online) et banque d'options NetSetup+0x124 sauvegardée/restaurée (l'original la
 //    met à 1 via 0xB8C690) ;
@@ -1093,15 +913,15 @@ static int __cdecl h_flevel(void* w, void* x) {
     }
     return r;
 }
-// v69 : bouton « Ajouter l'IA » (BTN_OfflineAddAI copié du lobby local, champ 0x2EE200F2 = 0x8E8DB0). En ligne
-// l'original sort sans rien faire (IsOnlineSessionRunning) : on relaie le clic à la même file que F9 (hôte), bip
-// grave chez l'invité. Hors ligne : original inchangé.
+// Bouton « Ajouter l'IA » (BTN_OfflineAddAI copié du lobby local, champ 0x2EE200F2 = 0x8E8DB0). En ligne
+// l'original sort sans rien faire (IsOnlineSessionRunning) : chez l'hôte, le clic demande un ajout (traité par
+// pump) ; chez l'invité, il est ignoré. Hors ligne : original inchangé.
 static PFN_FIELDCB o_faddai;
 static int __cdecl h_faddai(void* w, void* x) {
     if (!w || !f_online() || IsBadReadPtr(w, 0x2890)) return o_faddai(w, x);
     if (*((uint8_t*)w + 0x2888) & 1) {
-        if (!f_ishost()) { logf_("[bandeau] Ajouter l'IA : invite -> refuse"); Beep(330, 200); }
-        else { logf_("[bandeau] Ajouter l'IA -> ajout (comme F9)"); InterlockedExchange(&g_reqAddCpu, 1); }
+        if (!f_ishost()) logf_("[bandeau] Ajouter l'IA : invite -> ignore");
+        else { logf_("[bandeau] Ajouter l'IA -> ajout"); InterlockedExchange(&g_reqAddCpu, 1); }
     }
     return 1;
 }
@@ -1151,7 +971,7 @@ static void install_spies(void) {
     logf_("espion installe (7 fonctions)");
 }
 
-// ---------- traceur de la logique de tour (v19) ----------
+// ---------- logique de tour ----------
 // 0xC5E130 = TurnLogic::Update(obj, dt) cdecl, appelée à chaque image ; état courant à obj+0x48
 // (0..23, table de saut 0xC5E31C ; état 7 = 0xC5F2D0 qui lance l'IA). Le stub mémorise obj.
 // 0xC14620(k, masque) cdecl = masques « qui contrôle / doit répondre » posés au début de tour.
@@ -1172,9 +992,8 @@ static PFN_MASK o_setmask;
 static volatile LONG g_maskLines = 0;
 extern volatile LONG g_turnIsCPU, g_inGameOnline, g_hostIdent;
 static void __cdecl h_setmask(int k, uint32_t m) {
-    // v22 : en ligne, pendant le tour d'une IA, le contrôleur du tour (k = 7) et le joueur actif
-    // (k = 1) deviennent la machine de l'hôte (identité locale à chaque PC). Les valeurs -1 sont
-    // laissées telles quelles.
+    // Tour d'une IA en ligne. IA partagée : le contrôleur du tour (k = 7) devient « tous » (-1), chaque PC
+    // joue l'IA. Mode hôte seul : contrôleur (k = 7) et joueur actif (k = 1) = machine de l'hôte.
     uintptr_t ra = (uintptr_t)__builtin_return_address(0);
     (void)ra;
     if (g_cfg.aiShared && k == 7 && g_turnIsCPU && g_inGameOnline && m != 0xFFFFFFFFu) {
@@ -1189,8 +1008,8 @@ static void __cdecl h_setmask(int k, uint32_t m) {
         logf_("[tour] masque %d = %08X (appelant %08X)", k, m,
               (unsigned)((uintptr_t)__builtin_return_address(0) - g_base + REF_BASE));
 }
-// v39 : plusieurs IA. En ligne, la table des joueurs de partie n'a qu'UNE entrée IA (la 2e IA n'en a
-// aucune, test n°6 : les équipes sont données aux joueurs de la session, 0xB7E300 -> 0xB2EAB0). Pour
+// Plusieurs IA : en ligne, la table des joueurs de partie n'a qu'UNE entrée IA (les équipes sont données aux
+// joueurs de la session, 0xB7E300 -> 0xB2EAB0 ; les IA suivantes n'en ont pas). Pour
 // une équipe IA sans entrée, les recherches par équipe (0xB2CA90 identité, 0xB2CAD0 connexion,
 // 0xB2CB60 profil, 0xB2CC20 index) utilisent l'entrée de la première équipe IA qui en a une. Le jeu
 // n'a de toute façon qu'une manette virtuelle pour toutes les IA (0xDB0B40 la branche sur chaque
@@ -1218,7 +1037,7 @@ typedef int (__cdecl *PFN_TEAMPL)(uint32_t);
 static PFN_TEAMPL o_teamplayer;
 static int __cdecl h_teamplayer(uint32_t team) {
     int r = o_teamplayer(team_alias(team));
-    // v22 : en ligne, l'équipe IA est « contrôlée » par la machine de l'hôte (la table reste intacte)
+    // mode hôte seul : l'équipe IA est « contrôlée » par la machine de l'hôte (la table reste intacte)
     if (!g_cfg.aiShared && g_inGameOnline && g_hostIdent >= 0 && r != g_hostIdent && o_isteamcpu && o_isteamcpu(team)) {
         static volatile LONG n = 0;
         if (InterlockedIncrement(&n) <= 50) logf_("[tour] equipe IA %u : source %d -> %d (machine de l'hote)", team, r, (int)g_hostIdent);
@@ -1226,9 +1045,8 @@ static int __cdecl h_teamplayer(uint32_t team) {
     }
     spy(7, __builtin_return_address(0), team, r); return r;
 }
-// v24 : 0xB55BB0 = TurnEnder::SetState(v) thiscall ret 4 (ignoré si état actuel == 4). +0x38 vaut
+// Diagnostic : 0xB55BB0 = TurnEnder::SetState(v) thiscall ret 4 (ignoré si état actuel == 4). +0x38 vaut
 // 0 au début d'un tour (0xC5FAF2) ; 0xB55AE0(3) dans l'état 10 (0xC61078) termine le tour si +0x38 ∈ {1,3,4}.
-// On note chaque appel (objet, valeur, appelant) pour trouver qui termine le tour de l'IA en ligne.
 typedef void (__fastcall *PFN_TESET)(void*, void*, int);
 static PFN_TESET o_teset;
 static volatile LONG g_teLines = 0;
@@ -1239,7 +1057,7 @@ static void __fastcall h_teset(void* te, void* edx, int v) {
         logf_("[fin-de-tour] objet %p : %d -> %d demande (appelant %08X)", te, old, v,
               (unsigned)((uintptr_t)__builtin_return_address(0) - g_base + REF_BASE));
 }
-// v25 : 0xB1B3C0 = Team::Forfeit(team, raison) thiscall ret 8. Raisons : UI_Surrender,
+// 0xB1B3C0 = Team::Forfeit(team, raison) thiscall ret 8. Raisons : UI_Surrender,
 // UI_Complete_Level, RoundTimedOut, NoAllyWormsLeft, AllyVitalWormDied, NetRivalDropped (0xB06A03),
 // LocalDropped (0xB06A52). En ligne, au début de chaque tour, le jeu vérifie que l'équipe active a
 // un joueur réseau valide (0xB2CC20 → 0xB2BE50) ; l'IA n'en a pas → « LocalDropped » → fin de tour
@@ -1258,7 +1076,7 @@ static void __fastcall h_forfeit(void* self, void* edx, uint32_t team, const cha
     if (dropped && cpu && g_inGameOnline) return;
     o_forfeit(self, edx, team, why);
 }
-// v27 : 0xB2CC20(out, team) / 0xB2CAD0(out, team) (cdecl) renvoient le « joueur réseau » d'une équipe
+// 0xB2CC20(out, team) / 0xB2CAD0(out, team) (cdecl) renvoient le « joueur réseau » d'une équipe
 // (cherché dans la table des joueurs de partie par +0x14 = équipe). Le jeu vérifie à chaque image
 // (0xB068E0) que le joueur de l'équipe active est connecté (0xB2BE50 / 0x1059AB0) ; pour l'IA il ne
 // l'est pas → « NetRivalDropped » en boucle et la synchro de fin de tour ne démarre jamais.
@@ -1282,15 +1100,13 @@ static uint32_t redirect_team(uint32_t team, int which) {
     if (InterlockedIncrement(&n) <= 20) logf_("[joueur-reseau] equipe IA %u -> joueur reseau de l'equipe de l'hote %d (%s)", team, ht, which ? "0xB2CAD0" : "0xB2CC20");
     return (uint32_t)ht;
 }
-// v37 : PAS de redirection pour le code de la manette IA (0xDB0B40..0xDB0F62) :
+// PAS de redirection pour le code de la manette IA (0xDB0B40..0xDB10F0) :
 //  - 0xDB0B40 (chargement) : 0xB2CC20(IA) -> 0xB2EB30 vide le traducteur du joueur puis 0xB206B0 y branche
-//    WormLeft… sur la manette IA. Redirigé, c'était le traducteur de l'HÔTE qui était vidé/rebranché et
-//    celui de l'IA restait sur clavier/manette (cause des v32..v36 : l'IA appuie, son ver ne suit pas).
-//  - 0xDB0F10 (après chaque appui IA) : remise à zéro des entrées du joueur de l'équipe active.
+//    WormLeft… sur la manette IA. Redirigé, ce serait le traducteur de l'HÔTE qui serait rebranché.
+//  - 0xDB0F10 (après chaque appui IA) et 0xDB0FB0 (direction analogique, jetpack) : remise à jour des
+//    entrées du joueur de l'équipe active (0xDB10AF -> 0xB2D870).
 static void* __cdecl h_teamuser1(void* out, uint32_t team) {
     uintptr_t ra = (uintptr_t)__builtin_return_address(0);
-    // v41 : zone étendue à 0xDB10F0 : 0xDB0FB0 (direction analogique de l'IA, sert au jetpack) fait la
-    // même remise à jour des entrées du joueur de l'équipe active (0xDB10AF -> 0xB2D870) que 0xDB0F10.
     if (ra >= VA(0xDB0B40) && ra < VA(0xDB10F0)) {
         void* r = o_teamuser1(out, team_alias(team));
         static volatile LONG n = 0;
@@ -1302,19 +1118,18 @@ static void* __cdecl h_teamuser1(void* out, uint32_t team) {
     }
     return o_teamuser1(out, redirect_team(team_alias(team), 0));
 }
-// v43 : pas de redirection vers l'hôte pour l'AFFICHAGE : nom d'équipe 0xACF590 (appel 0xACF698) et message
-// de fabrication 0xD56F80 (appel 0xD57202). Redirigés, ils prenaient le nom Steam de l'hôte pour les équipes IA.
+// Pas de redirection vers l'hôte pour l'AFFICHAGE, sinon les équipes IA prendraient le nom Steam de l'hôte.
 static void* __cdecl h_teamuser2(void* out, uint32_t team) {
     uintptr_t ra = (uintptr_t)__builtin_return_address(0);
-    // v44 : tous les affichages de nom suivant le schéma « joueur réseau connecté ? nom Steam (0x1059A00) :
-    // nom d'équipe (0xACF590) » (adresses de retour des appels 0xB2CAD0) : listes, tour, abandon, fabrication…
+    // affichages de nom suivant le schéma « joueur réseau connecté ? nom Steam (0x1059A00) : nom d'équipe
+    // (0xACF590) » (adresses de retour des appels 0xB2CAD0) : listes, tour, abandon, fabrication…
     static const uint32_t NAME_RA[] = { 0xACF69D, 0xD57207, 0x8D16B8, 0x8D1F90, 0x8D216C, 0xB15924,
                                         0xB1B5E4, 0xB4E1BE, 0xC5F6B1, 0xCE361D };
     for (unsigned k = 0; k < sizeof NAME_RA / sizeof NAME_RA[0]; k++)
         if (ra == VA(NAME_RA[k])) return o_teamuser2(out, team_alias(team));
     return o_teamuser2(out, redirect_team(team_alias(team), 1));
 }
-static PFN_TEAMUSER o_teamprof;   // v39 : 0xB2CB60(out, équipe) = profil de l'entrée (+0x1C)
+static PFN_TEAMUSER o_teamprof;   // 0xB2CB60(out, équipe) = profil de l'entrée (+0x1C)
 static void* __cdecl h_teamprof(void* out, uint32_t team) { return o_teamprof(out, team_alias(team)); }
 static void install_turn_trace(void) {
     static const uint8_t s1[] = {0x55,0x8b,0xec,0xf3,0x0f,0x10,0x45,0x0c};
@@ -1392,48 +1207,6 @@ static void turn_watch(void) {
     }
 }
 
-// ---------- F4 : sauvegarde des données d'équipes de la partie ----------
-// Tableau global rempli par l'hôte au lancement (0xBF7500/0xBF8F90 via les setters 0xAE....) :
-// en-tête à 0x58BA4E0, équipe i à 0x58BA510 + i*0xD98 (nom du profil IA à +0xD38).
-#define A_TEAMS_HDR  0x58BA4E0
-#define TEAMS_BYTES  (0x30 + 6 * 0xD98)
-static void dump_teams(void) {
-    uint8_t* p = (uint8_t*)VA(A_TEAMS_HDR);
-    if (IsBadReadPtr(p, TEAMS_BYTES)) { logf_("F4 : donnees d'equipes illisibles"); return; }
-    static uint8_t buf[TEAMS_BYTES];
-    memcpy(buf, p, TEAMS_BYTES);
-    logf_("F4 : etat des equipes (log uniquement, plus de fichier .bin)");
-    // Table des « joueurs de partie » : 12 x 0x50 à 0xE4C3AF0 (+0 drapeaux, 0x800 = ce PC ;
-    // +0x14 = équipe ; 0xB2CA90(team) y cherche le joueur d'une équipe pour le masque de contrôle du tour)
-    uint8_t* pt = (uint8_t*)VA(0xE4C3AF0);
-    if (!IsBadReadPtr(pt, 12 * 0x50))
-        for (int i = 0; i < 12; i++) {
-            uint32_t w[20]; memcpy(w, pt + i * 0x50, sizeof w);
-            int any = 0; for (int k = 0; k < 20; k++) if (w[k]) any = 1;
-            if (!any) continue;
-            logf_("  joueur[%2d] %08X %08X %08X %08X | %08X %08X %08X %08X | %08X %08X %08X %08X | %08X %08X %08X %08X | %08X %08X %08X %08X",
-                  i, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9], w[10], w[11],
-                  w[12], w[13], w[14], w[15], w[16], w[17], w[18], w[19]);
-        }
-    int count; memcpy(&count, buf, 4);
-    for (int i = 0; i < 6 && i < count; i++) {
-        uint8_t* tm = buf + 0x30 + i * 0xD98;
-        logf_("  equipe %d : 0x00-0x2C = %08X %08X %08X %08X %08X %08X %08X %08X", i,
-              *(uint32_t*)(tm + 0x00), *(uint32_t*)(tm + 0x10), *(uint32_t*)(tm + 0x14), *(uint32_t*)(tm + 0x18),
-              *(uint32_t*)(tm + 0x1C), *(uint32_t*)(tm + 0x20), *(uint32_t*)(tm + 0x24), *(uint32_t*)(tm + 0x2C));
-        // fin de l'équipe : chaînes (profil IA en +0xD38, identité du joueur en +0xD7C..+0xD94 ?)
-        for (int o = 0xD38; o < 0xD98; o += 4) {
-            uint32_t v = *(uint32_t*)(tm + o);
-            const char* s = (const char*)(uintptr_t)v;
-            if (v > 0x10000 && !IsBadReadPtr(s, 1)) {
-                char tmp[48]; int k = 0;
-                for (; k < 40 && !IsBadReadPtr(s + k, 1) && s[k]; k++) tmp[k] = (s[k] >= 32 && s[k] < 127) ? s[k] : '.';
-                tmp[k] = 0;
-                logf_("    +%03X = %08X '%s'", o, v, tmp);
-            } else logf_("    +%03X = %08X", o, v);
-        }
-    }
-}
 
 static LONG CALLBACK veh(EXCEPTION_POINTERS* e) {
     static int n = 0;
@@ -1443,30 +1216,19 @@ static LONG CALLBACK veh(EXCEPTION_POINTERS* e) {
     }
     return EXCEPTION_CONTINUE_SEARCH;
 }
-static BOOL CALLBACK enum_cb(HWND h, LPARAM lp) {
-    DWORD pid; DWORD tid = GetWindowThreadProcessId(h, &pid);
-    if (pid == GetCurrentProcessId() && IsWindowVisible(h)) { *(DWORD*)lp = tid; return FALSE; }
-    return TRUE;
-}
 
 // ---------- table des joueurs de partie (0xE4C3AF0, 12 x 0x50) ----------
 // Entrée : +0 drapeaux (3 = actif, 0x800 = ce PC), +4/+8/+C manettes (-1 = aucune),
 // +0x10 identité, +0x14 rang, +0x24 connexion réseau (0 pour une IA).
-// En ligne, l'entrée de l'IA est identique sur les deux PC (ni 0x800, ni connexion) : chacun
-// lance l'IA, elle abandonne au bout de ~3 s et le tour reste bloqué (« chargement infini »).
-// Essai v18 : chez l'hôte, l'entrée IA reçoit le drapeau 0x800 → l'hôte en est le propriétaire.
 #define A_PLAYERS 0xE4C3AF0
 static uint32_t g_ptSnap[24]; static int g_ptInit = 0;
-// v22 : la table n'est plus modifiée (identités uniques, pas de 0x800 sur l'IA, pas de connexion).
-// On retient seulement l'identité de la machine de l'hôte dans la table de CE PC (hôte : son entrée
-// locale avec manettes ; client : l'entrée distante avec connexion de l'équipe 0). Pendant le tour
-// d'une IA, h_setmask désigne cette identité comme contrôleur : l'hôte joue le tour (l'IA tourne
-// chez lui) et l'envoie comme son propre tour ; le client attend et rejoue les messages de l'hôte.
+// On retient l'identité de la machine de l'hôte dans la table de CE PC (hôte : son entrée locale avec
+// manettes ; invité : l'entrée distante avec connexion), utilisée en mode hôte seul (h_setmask, h_teamplayer).
 volatile LONG g_inGameOnline = 0, g_isHostCached = 0, g_hostIdent = -1;
 static void players_watch(uint8_t* n) {
     uint8_t* pt = (uint8_t*)VA(A_PLAYERS);
     int online = n && f_online(), host = online && f_ishost();
-    // v26 : valeurs « collantes » pendant une partie (le drapeau 0x800 de l'entrée locale et
+    // valeurs « collantes » pendant une partie (le drapeau 0x800 de l'entrée locale et
     // f_online/f_ishost clignotent parfois en cours de partie → identité perdue au début du tour IA)
     int inGame = 0;
     for (int i = 0; i < 12; i++) { uint32_t* w = (uint32_t*)(pt + i * 0x50); if ((w[0] & 3) == 3 && (int)w[5] >= 0) inGame = 1; }
@@ -1503,7 +1265,7 @@ static void players_watch(uint8_t* n) {
             hostId = id800;
         }
     }
-    // v28 : identification par Steam ID (*(entrée.+0x24 connexion)+0x18), si fourni dans wmdmod.ini
+    // identification par Steam ID (*(entrée.+0x24 connexion)+0x18), si fourni dans wmdmod.ini
     if (inGame && g_cfg.hostSteamId) {
         for (int i = 0; i < 12; i++) {
             uint32_t* w = (uint32_t*)(pt + i * 0x50);
@@ -1511,10 +1273,10 @@ static void players_watch(uint8_t* n) {
             if (*(unsigned long long*)(uintptr_t)(w[9] + 0x18) == g_cfg.hostSteamId) { hostId = (int)w[4]; break; }
         }
     }
-    // v33 (IA partagée) : en ligne, le jeu ne lit les entrées (traducteur +0x28) que des joueurs
+    // IA partagée : en ligne, le jeu ne lit les entrées (traducteur +0x28) que des joueurs
     // marqués « ce PC » (0x800) ; les autres arrivent par le réseau. L'IA tourne sur chaque PC : on
     // marque donc son entrée « ce PC » sur CHAQUE PC pour que sa manette virtuelle soit lue localement.
-    if (inGame && g_inGameOnline && g_cfg.aiShared && g_cfg.markLocal) {
+    if (inGame && g_inGameOnline && g_cfg.aiShared) {
         for (int i = 0; i < 12; i++) {
             uint32_t* w = (uint32_t*)(pt + i * 0x50);
             if ((w[0] & 3) == 3 && w[1] == 0xFFFFFFFFu && w[9] == 0 && (int)w[5] >= 0 && !(w[0] & 0x800)) {
@@ -1531,10 +1293,8 @@ static void players_watch(uint8_t* n) {
         if (w[0] != g_ptSnap[i] || w[9] != g_ptSnap[12 + i]) changed = 1;
     }
     if (!changed) return;
-    // v27 (diagnostic) : où la table stocke-t-elle l'identifiant Steam de chaque joueur ? On cherche
-    // les Steam ID du lobby (liste visible NetSetup +0xD30, id 64 bits à +0x10) dans l'entrée et dans
-    // les objets pointés par l'entrée (0x400 premiers octets). Une fois connu, l'hôte sera identifié
-    // par son Steam ID (fiable aussi à 3 humains ou plus).
+    // diagnostic : emplacement des Steam ID du lobby (liste visible +0xD30, id 64 bits à +0x10) dans l'entrée
+    // et dans les objets pointés par l'entrée (0x400 premiers octets).
     if (n && inGame) {
         static int scans = 0;
         if (scans < 3) {
@@ -1570,53 +1330,33 @@ static void players_watch(uint8_t* n) {
     }
 }
 
-// ---------- v29 : les actions de l'IA passent par les entrées de l'hôte ----------
-// Constat (test v28) : pendant le tour IA, les touches de l'hôte sont enregistrées et rejouées chez
-// le client (déplacements vus des deux côtés). Les boutons virtuels de l'IA, eux, sont écrits
-// directement dans le ver (+0x816 via 0xB47E40, remise à zéro 0xB48130) et ne circulent pas.
-// → Chez l'hôte, pendant un tour IA en ligne : on n'écrit plus ces boutons dans le ver, on les
-//   convertit en VRAIES touches (SendInput, codes clavier) que le jeu enregistre et diffuse.
-//   Table du ver (0xB4AF30) : bit 0 WormLeft, 1 WormRight, 2 WormJumpPrimary, 3 WormJumpSecondary,
-//   4 WormUp, 5 WormDown, 6 WormFireWeapon, 7 WormEnterExitVehicle. Touches par défaut
-//   (DefaultKeybindings) : Gauche, Droite, Entrée, Retour arrière, Haut, Bas, Espace.
-// Choix d'arme : l'IA appelle 0xB47E20 → Worm::RequestCurrentEquip 0xB4EC60(arme, 0) : le 0 = « ne
-//   pas envoyer sur le réseau ». On appelle 0xB4EC60(arme, 1) à la place (envoi 0xAC8170).
+// ---------- entrées de l'IA en ligne ----------
+// Les boutons virtuels de l'IA sont écrits directement dans le ver (+0x816 via 0xB47E40) et ne circulent
+// pas sur le réseau. Mode IA partagée (par défaut) : l'IA tourne sur chaque PC, rien n'est envoyé.
+// Mode hôte seul (IAPartagee=0) : le choix d'arme de l'IA (0xB47E20 -> Worm::RequestCurrentEquip
+// 0xB4EC60(arme, 0), 0 = « ne pas envoyer ») est rediffusé par 0xB4EC60(arme, 1) (envoi 0xAC8170).
 static int ai_turn_online_host(void) {
     if (!(g_inGameOnline && (g_isHostCached || g_cfg.aiShared) && g_turnIsCPU && g_turnObj)) return 0;
     int st = *(int*)(uintptr_t)(g_turnObj + 0x48);
     return st >= 6 && st <= 13;
 }
-static volatile LONG g_aiPadPending = 0, g_aiPadCommitted = 0;
 typedef void (__fastcall *PFN_PADSET)(void*, void*, uint32_t, int);
-typedef void (__fastcall *PFN_PADCLR)(void*, void*);
-static PFN_PADSET o_padset; static PFN_PADCLR o_padclr;
+static PFN_PADSET o_padset;
 static volatile LONG g_padSetLog = 0;
-static void __fastcall h_padset(void* worm, void* edx, uint32_t bit, int on) {
+static void __fastcall h_padset(void* worm, void* edx, uint32_t bit, int on) {   // diagnostic
     if (g_cfg.verbose && InterlockedIncrement(&g_padSetLog) <= 200)
-        logf_("[IA-entrees] 0xB47E40 bit %u etat %d (tour IA hote=%d)", bit, on, ai_turn_online_host());
-    if (g_cfg.injectKeys && ai_turn_online_host() && bit < 16) {
-        if (on) __sync_fetch_and_or(&g_aiPadPending, 1 << bit); else __sync_fetch_and_and(&g_aiPadPending, ~(1 << bit));
-        return;   // pas d'écriture directe dans le ver : il recevra les touches comme chez le client
-    }
+        logf_("[IA-entrees] 0xB47E40 bit %u etat %d (tour IA en ligne=%d)", bit, on, ai_turn_online_host());
     o_padset(worm, edx, bit, on);
-}
-static void __fastcall h_padclr(void* worm, void* edx) {
-    if (g_cfg.injectKeys && ai_turn_online_host()) {
-        // l'IA remet ses boutons à zéro au début de chaque mise à jour : on valide ceux de la précédente
-        g_aiPadCommitted = g_aiPadPending; g_aiPadPending = 0;
-        return;
-    }
-    o_padclr(worm, edx);
 }
 typedef void (__fastcall *PFN_REQEQUIP)(void*, void*, uint32_t, int);
 typedef void (__fastcall *PFN_THIS0V)(void*, void*);
 typedef void (__fastcall *PFN_AISELECT)(void*, void*, uint32_t);
 static PFN_REQEQUIP f_reqequip; static PFN_THIS0V f_equipdone; static PFN_AISELECT o_aiselect;
-// v30 : pendant sa réflexion l'IA essaie des centaines d'armes (0xB47E20 en boucle) : on ne
-// diffuse que le choix stable depuis 1,2 s (et juste avant un tir), depuis ai_equip_pump().
+// Pendant sa réflexion l'IA passe en revue des centaines d'armes (0xB47E20 en boucle) : en mode hôte seul,
+// on ne diffuse que le choix stable depuis 1,2 s (et juste avant un tir), depuis ai_equip_pump().
 static void* volatile g_aiEquipWorm = 0; static volatile LONG g_aiEquip = -1, g_aiEquipSent = -1;
 static volatile DWORD g_aiEquipTime = 0;
-static volatile LONG g_aiLastEquip = -1;   // v42 : dernière arme demandée par l'IA (tous modes)
+static volatile LONG g_aiLastEquip = -1;   // dernière arme demandée par l'IA (tous modes)
 static void __fastcall h_aiselect(void* worm, void* edx, uint32_t equip) {
     o_aiselect(worm, edx, equip);          // local, sans réseau (comme l'original)
     g_aiLastEquip = (LONG)equip;
@@ -1636,10 +1376,8 @@ static void ai_equip_pump(void) {
     if (!ai_turn_online_host()) { g_aiEquip = -1; g_aiEquipSent = -1; g_aiEquipWorm = 0; return; }
     if (!g_cfg.aiShared && g_aiEquip >= 0 && GetTickCount() - g_aiEquipTime > 1200) ai_equip_flush("choix stable");
 }
-// v30 : l'IA n'est jamais passée par 0xB47E40 pour marcher (« got stuck »). On lit donc les boutons
-// là où le ver les consomme : 0xB4C7C0 (thiscall, out*) lit ver+0x816 (bits 0..14). Pendant le tour
-// IA chez l'hôte : on retient ces bits pour les touches, et on les efface pour que le ver ne les
-// applique pas directement (il recevra les touches, comme chez le client).
+// Boutons de l'IA lus là où le ver les consomme : 0xB4C7C0 (thiscall, out*) lit ver+0x816 (bits 0..14).
+// Diagnostic, et en mode hôte seul : envoi de l'arme juste avant un tir.
 typedef char (__fastcall *PFN_PADREAD)(void*, void*, uint32_t*);
 static PFN_PADREAD o_padread;
 static volatile LONG g_padReadLog = 0, g_heldLog = 0;
@@ -1647,10 +1385,9 @@ static char __fastcall h_padread(void* worm, void* edx, uint32_t* out) {
     if (ai_turn_online_host() && worm) {
         uint16_t v = *(uint16_t*)((uint8_t*)worm + 0x816);
         if (v) {
-            g_aiPadPending |= v; g_aiPadCommitted = v;
             if (g_cfg.verbose && InterlockedIncrement(&g_padReadLog) <= 300) logf_("[IA-entrees] ver %p boutons %04X", worm, v);
             if ((v & 0x0040) && !g_cfg.aiShared) ai_equip_flush("avant tir");
-        } else g_aiPadCommitted = 0;
+        }
     }
     return o_padread(worm, edx, out);
 }
@@ -1665,20 +1402,7 @@ static void __fastcall h_heldmask(void* o, void* edx, uint32_t m) {
     if (g_cfg.verbose && ai_turn_online_host() && InterlockedIncrement(&g_heldLog) <= 300) logf_("[IA-entrees] tenu masque %08X", m);
     o_heldmask(o, edx, m);
 }
-// Injection des touches (appelée depuis pump, thread logique)
-static const struct { WORD scan; int ext; const char* name; } AI_KEYS[8] = {
-    {0x4B, 1, "Gauche"}, {0x4D, 1, "Droite"}, {0x1C, 0, "Entree"}, {0x0E, 0, "RetourArriere"},
-    {0x48, 1, "Haut"},   {0x50, 1, "Bas"},    {0x39, 0, "Espace"}, {0x00, 0, "Vehicule"} };
-static uint32_t g_keysDown = 0;
-static void send_key(int i, int down) {
-    if (!AI_KEYS[i].scan) return;
-    INPUT in; memset(&in, 0, sizeof in);
-    in.type = INPUT_KEYBOARD;
-    in.ki.wScan = AI_KEYS[i].scan;
-    in.ki.dwFlags = KEYEVENTF_SCANCODE | (AI_KEYS[i].ext ? KEYEVENTF_EXTENDEDKEY : 0) | (down ? 0 : KEYEVENTF_KEYUP);
-    SendInput(1, &in, sizeof in);
-}
-// v31 : l'IA joue avec une manette virtuelle (IA+0x4E450, 0xDB10F0(emplacement, valeur)), qui est
+// Mode hôte seul (TraducteurIA) : l'IA joue avec une manette virtuelle (IA+0x4E450, 0xDB10F0(emplacement, valeur)), qui est
 // un vrai périphérique d'entrée lu par le traducteur d'entrées du joueur IA (entrée IA +0x28). En
 // ligne, le tour de l'IA est piloté par la machine de l'hôte, qui enregistre et envoie les actions
 // de SON traducteur (entrée locale +0x28). Pendant le tour IA, on donne donc à l'entrée locale de
@@ -1716,26 +1440,9 @@ static void mapper_swap_pump(void) {
     host[10] = ai[10];
     logf_("[traducteur] tour IA (equipe %d) : l'hote utilise le traducteur de l'IA %08X (le sien : %08X)", team, g_swapAI, g_swapOrig);
 }
-static void ai_keys_pump(void) {
+static void ai_input_pump(void) {
     mapper_swap_pump();
-    uint32_t want = 0;
     ai_equip_pump();
-    if (g_cfg.injectKeys && ai_turn_online_host()) {
-        DWORD pid = 0; GetWindowThreadProcessId(GetForegroundWindow(), &pid);
-        uint32_t bits = ((uint32_t)g_aiPadCommitted | (uint32_t)g_aiPadPending) & 0x7F;
-        if (pid == GetCurrentProcessId()) want = bits;
-        else if (bits) { static DWORD lw = 0; if (GetTickCount() - lw > 3000) { lw = GetTickCount(); logf_("[IA-entrees] fenetre du jeu pas au premier plan : touches non envoyees"); } }
-        g_aiPadPending = 0;
-    } else { g_aiPadCommitted = 0; g_aiPadPending = 0; }
-    if (want == g_keysDown) return;
-    for (int i = 0; i < 8; i++) {
-        uint32_t m = 1u << i;
-        if ((want & m) != (g_keysDown & m)) {
-            send_key(i, (want & m) != 0);
-            if (g_cfg.verbose) logf_("[IA-entrees] %s %s", AI_KEYS[i].name, (want & m) ? "appuyee" : "relachee");
-        }
-    }
-    g_keysDown = want;
 }
 static void install_ai_input(void) {
     static const uint8_t a1[] = {0x55,0x8b,0xec,0x8d,0x91,0x16,0x08,0x00,0x00};
@@ -1745,7 +1452,6 @@ static void install_ai_input(void) {
         logf_("IA-entrees : signature inattendue, desactive"); return;
     }
     o_padset    = (PFN_PADSET)make_hook(VA(0xB47E40), h_padset, 9);
-    o_padclr    = (PFN_PADCLR)make_hook(VA(0xB48130), h_padclr, 9);
     f_reqequip  = (PFN_REQEQUIP)VA(0xB4EC60);
     f_equipdone = (PFN_THIS0V)VA(0xB4E850);
     o_aiselect  = (PFN_AISELECT)make_hook(VA(0xB47E20), h_aiselect, 6);
@@ -1756,10 +1462,10 @@ static void install_ai_input(void) {
     else logf_("IA-entrees : signature 0xB4C7C0 inattendue");
     if (!memcmp((void*)VA(0xCEF7C0), a5, 8)) o_heldbit = (PFN_HELD)make_hook(VA(0xCEF7C0), h_heldbit, 8);
     if (!memcmp((void*)VA(0xCEF7E0), a6, 6)) o_heldmask = (PFN_HELD)make_hook(VA(0xCEF7E0), h_heldmask, 6);
-    logf_("IA-entrees installe (touches=%d)", g_cfg.injectKeys);
+    logf_("IA-entrees installe");
 }
 
-// ---------- v34 : diagnostic complet de la chaîne d'entrées de l'IA ----------
+// ---------- chaîne d'entrées de l'IA (diagnostic + rebranchement) ----------
 // Maillons : (1) manette virtuelle de l'IA 0xDB10F0(emplacement, valeur) ; (2) traducteur d'entrées
 // (entrée+0x28 : tableau de nœuds [+8, +0xC[ indexé par numéro d'action, nœud->vfunc[2]() = valeur) ;
 // (3) événements d'action reçus par le ver 0xB4DB60(?, événement) (type 0xD640B040, action 0xD6B020).
@@ -1787,7 +1493,7 @@ static const char* act_name(int idx) {
     return "?";
 }
 static volatile uint32_t g_vpadDev = 0, g_vpadObj = 0;
-// v42 : file de commandes de l'IA : 0xDCBD80(id, nom) thiscall ret 8 (empile une commande ; le nom est
+// File de commandes de l'IA : 0xDCBD80(id, nom) thiscall ret 8 (empile une commande ; le nom est
 // la chaîne « kAICommand_... »). On logue chaque commande (sans les répétitions consécutives).
 typedef void (__fastcall *PFN_AICMD)(void*, void*, uint32_t, const char*);
 static PFN_AICMD o_aicmd;
@@ -1822,7 +1528,7 @@ static char __fastcall h_wormevt(void* worm, void* edx, uint32_t a, uint32_t evt
         uint32_t e = evt;
         int type = ((PFN_EVTGET)VA(0xD6B040))(&e, 0);
         int act  = ((PFN_EVTGET)VA(0xD6B020))(&e, 0);
-        // v36 : on ignore le bruit (type 13, actions 51-54 à chaque image) ; une ligne par nouvelle action
+        // on ignore le bruit (type 13, actions 51-54 à chaque image) ; une ligne par nouvelle action
         static int lastAct = -1, lastType = -1; static DWORD lastT = 0; static LONG same = 0;
         if (!(type == 13 && act >= 51 && act <= 54)) {
             DWORD now = GetTickCount();
@@ -1848,12 +1554,12 @@ static float mapper_value(uint32_t mapper, int idx) {
     if (!node || IsBadReadPtr(node, 8)) return -7;
     void** vt = *(void***)node;
     if (!vt || IsBadReadPtr(vt, 12)) return -6;
-    // v36 : en sortie de partie le traducteur peut être libéré (vfunc nulle -> crash EIP=0)
+    // en sortie de partie le traducteur peut être libéré (vfunc nulle -> crash EIP=0)
     if ((uintptr_t)vt[2] < VA(0x7F1000) || (uintptr_t)vt[2] >= VA(0x13C8000)) return -5;
     return ((PFN_NODEVAL)vt[2])(node, 0);
 }
-// v35 : en ligne, la manette virtuelle de l'IA reçoit bien les appuis (log v34) mais le traducteur
-// de l'IA reste à 0 : ses nœuds « touche » (vtable 0x164CB8C : source +8, index +0xC, valeur =
+// En ligne, la manette virtuelle de l'IA reçoit bien les appuis mais le traducteur de l'IA reste à 0 :
+// ses nœuds « touche » (vtable 0x164CB8C : source +8, index +0xC, valeur =
 // source+0x20[index], 0xD53DA0) ne lisent pas le périphérique de la manette. On relève les nœuds
 // du traducteur IA et, pendant le tour de l'IA, on fait lire leur valeur dans la manette de l'IA.
 #define VT_KEYNODE 0x164CB8C
@@ -1965,8 +1671,8 @@ static void rebind_pump(void) {
         if (g_aiNodesMapper) {
             logf_("[rebranchement] fin du tour IA : %ld lectures redirigees vers la manette IA", g_rebindHits);
             g_aiNodeCount = 0; g_aiNodesMapper = 0; g_aiNodesDev = 0; g_rebindHits = 0;
-            g_rebindLog = 0; g_vpadLog = 0; g_evtLogAI = 0;   // v36 : plafonds de log par tour IA
-            for (int i = 0; i < 16; i++) g_vpadLast[i] = -1;   // v40 : tout appui du tour suivant est logué
+            g_rebindLog = 0; g_vpadLog = 0; g_evtLogAI = 0;   // plafonds de log par tour IA
+            for (int i = 0; i < 16; i++) g_vpadLast[i] = -1;   // tout appui du tour suivant est logué
         }
         return;
     }
@@ -2017,7 +1723,7 @@ static void diag_mappers_pump(void) {
         }
     }
 }
-static void install_diag_v34(void) {
+static void install_ai_diag(void) {
     static const uint8_t d1[] = {0x55,0x8b,0xec,0x56,0xff,0x75,0x08,0x8b,0xf1};
     static const uint8_t d2[] = {0x55,0x8b,0xec,0x6a,0xff};
     if (!memcmp((void*)VA(0xDB10F0), d1, 9)) o_vpad = (PFN_VPAD)make_hook(VA(0xDB10F0), h_vpad, 9);
@@ -2030,25 +1736,24 @@ static void install_diag_v34(void) {
     static const uint8_t d3[] = {0xff,0x71,0x0c,0x8b,0x49,0x08,0xe8};
     if (!memcmp((void*)VA(0xD53DA0), d3, 7)) o_keyval = (PFN_KEYVAL)make_hook(VA(0xD53DA0), h_keyval, 6);
     else logf_("diag : signature 0xD53DA0 inattendue");
-    logf_("diagnostic v34 + rebranchement v35 installes");
+    logf_("diagnostic des entrees IA installe");
 }
 
 static void pump(void) {
     if (!g_mainTid || GetCurrentThreadId() != g_mainTid) return;
-    g_pumpCalls++;
     watch_options();
     uint8_t* n = ns();
     static DWORD lastPlayers = 0;
     if (GetTickCount() - lastPlayers >= 200) { lastPlayers = GetTickCount(); players_watch(n); }
     turn_watch();
-    ai_keys_pump();
+    ai_input_pump();
     diag_mappers_pump();
-    // v38 : à chaque début d'action (état 8), équipe du tour et ver actif (index +0x30 du gestionnaire)
+    // à chaque début d'action (état 8) : équipe du tour et ver actif (index +0x30 du gestionnaire)
     if (g_turnObj) {
         static int lastSt = -1;
         int st = *(int*)(uintptr_t)(g_turnObj + 0x48);
         if (st != lastSt && st == 8) {
-            g_evtLogHuman = 0; g_evtLogAI = 0; g_aiCmdLog = 0;   // v42 : plafonds de log par tour
+            g_evtLogHuman = 0; g_evtLogAI = 0; g_aiCmdLog = 0;   // plafonds de log par tour
             uint8_t* wm = *(uint8_t**)VA(0xE4C5B3C); uint8_t* tm = *(uint8_t**)VA(0xE4C506C);
             int team = tm ? ((PFN_CURTEAM)VA(0xB3E5B0))(tm, 0) : -1;
             int idx = (wm && !IsBadReadPtr(wm, 0x40)) ? *(int*)(wm + 0x30) : -1;
@@ -2057,9 +1762,9 @@ static void pump(void) {
         }
         lastSt = st;
     }
-    // v28 (essai, ForcerBoutonsIA) : pendant le tour IA chez l'hôte, active le drapeau « boutons IA »
-    // (+0x814 bit 0) du ver actif, pour que la mise à jour du ver (0xB4CA60) applique les boutons
-    // virtuels de l'IA (+0x816). Ver actif = [0xE4C5B3C] : index +0x30, tableau +0x3C.
+    // ForcerBoutonsIA : pendant le tour IA en ligne, active le drapeau « boutons IA » (+0x814 bit 0) du ver
+    // actif, pour que la mise à jour du ver (0xB4CA60) applique les boutons virtuels de l'IA (+0x816).
+    // Ver actif = [0xE4C5B3C] : index +0x30, tableau +0x3C.
     if (g_cfg.forcePadAI && g_inGameOnline && (g_isHostCached || g_cfg.aiShared) && g_turnIsCPU && g_turnObj) {
         int st = *(int*)(uintptr_t)(g_turnObj + 0x48);
         uint8_t* wm = *(uint8_t**)VA(0xE4C5B3C);
@@ -2069,7 +1774,7 @@ static void pump(void) {
             if (worm && !IsBadReadPtr(worm, 0x820) && !(worm[0x814] & 1)) {
                 worm[0x814] |= 1;
                 static DWORD lastLog = 0;
-                if (GetTickCount() - lastLog > 3000) { lastLog = GetTickCount(); logf_("[essai] ver IA %p : drapeau boutons IA force (etat %d)", worm, st); }
+                if (GetTickCount() - lastLog > 3000) { lastLog = GetTickCount(); logf_("[ver IA] %p : drapeau boutons IA force (etat %d)", worm, st); }
             }
         }
     }
@@ -2078,7 +1783,7 @@ static void pump(void) {
         lastNames = GetTickCount();
         if (f_online()) { if (f_ishost()) pending_cpu_teams(n); refresh_cpu_names(n); }
     }
-    // v50 : o_rebuild (trampoline) ne passe pas par h_rebuild -> les IA n'étaient pas réinjectées chez le client
+    // o_rebuild (trampoline) ne passe pas par h_rebuild : on réinjecte les IA nous-mêmes
     if (g_reqRebuild) { InterlockedExchange(&g_reqRebuild, 0); if (n) { o_rebuild(n, 0); inject_cpus(n); ui_pulse(); dump_lists("apres reception IA"); } }
     ui_pulse_pump(n);
     if (g_reqKickLo) {
@@ -2093,42 +1798,16 @@ static void pump(void) {
         uint32_t lo = (uint32_t)InterlockedExchange(&g_reqDownLo, 0);
         if (n && f_online() && f_ishost()) { step_cpu_level(n, lo, -1); refresh_cpu_names(n); ui_pulse(); }
     }
-    if (g_reqRelabel) {
-        LONG m = InterlockedExchange(&g_reqRelabel, 0);
-        if (n && f_online() && f_ishost()) { if (m == 1) relabel_all_cpus(n, "F3"); else restore_cpu_teams(n, "F3"); ui_pulse(); }
-    }
-    if (g_reqDump)    { InterlockedExchange(&g_reqDump, 0); dump_lists("F8"); }
-    if (g_reqOpt)     { InterlockedExchange(&g_reqOpt, 0); dump_lists("F6"); dump_options("F6"); }
-    if (g_reqLvl) {
-        InterlockedExchange(&g_reqLvl, 0);
-        if (!n) { logf_("F5 : pas de lobby"); return; }
-        if (!f_online()) { logf_("F5 : hors ligne, utilise les medailles du jeu"); return; }
-        if (!f_ishost()) { logf_("F5 : seul l'hote peut changer la difficulte"); Beep(330, 200); return; }
-        cycle_cpu_level(n, 0);
-        refresh_cpu_names(n);
-        ui_pulse();
-    }
-    if (g_reqDel) {
-        InterlockedExchange(&g_reqDel, 0);
-        if (!n) { logf_("F7 : pas de lobby"); return; }
-        if (!f_online()) { logf_("F7 : hors ligne, utilise le menu du jeu"); return; }
-        if (!f_ishost()) { logf_("F7 : seul l'hote peut retirer des IA"); Beep(330, 200); return; }
-        remove_cpu(n, 0);
-        ui_pulse();
-    }
     if (g_reqAddCpu) {
         InterlockedExchange(&g_reqAddCpu, 0);
-        logf_("F9 : traitement (NetSetup=%p)", n);
-        if (!n) { logf_("F9 : pas de lobby"); return; }
-        int on = f_online(); logf_("F9 : online=%d", on);
-        int ho = f_ishost(); logf_("F9 : hote=%d", ho);
-        if (on && !ho) { logf_("F9 : seul l'hote peut ajouter des IA"); Beep(330, 200); return; }
+        if (!n) { logf_("[ajout IA] pas de lobby"); return; }
+        int on = f_online(), ho = f_ishost();
+        if (on && !ho) { logf_("[ajout IA] seul l'hote peut ajouter des IA"); return; }
         g_cpuCounter++;
         g_forceRand = (int)(MAGIC_LO | (uint32_t)g_cpuCounter);
-        logf_("F9 : appel AddCpuSlot...");
         int slot = f_addcpu(n, 0);
         g_forceRand = -1;
-        logf_("F9 : AddCpuSlot -> %d (id %08X)", slot, MAGIC_LO | g_cpuCounter);
+        logf_("[ajout IA] AddCpuSlot -> %d (id %08X, en ligne=%d)", slot, MAGIC_LO | g_cpuCounter, on);
         if (slot >= 0 && slot < 6 && on) {
             uint32_t lo = MAGIC_LO | g_cpuCounter;
             uint8_t* le = n + NS_LOCAL + slot * 0x18;   // nom de ligne fixé avant le 1er affichage
@@ -2137,16 +1816,16 @@ static void pump(void) {
             pending_cpu_teams(n);
             ui_pulse();
         }
-        dump_lists("F9");
+        dump_lists("ajout IA");
     }
 }
 
 typedef DWORD (WINAPI *PFN_XIGS)(DWORD, void*);
 static PFN_XIGS o_xigs;
-static DWORD WINAPI h_xigs(DWORD i, void* s) { g_xiTid = GetCurrentThreadId(); if (i == 0) pump(); return o_xigs(i, s); }
+static DWORD WINAPI h_xigs(DWORD i, void* s) { if (i == 0) pump(); return o_xigs(i, s); }
 typedef DWORD (WINAPI *PFN_TGT)(void);
 static PFN_TGT o_tgt;
-static DWORD WINAPI h_tgt(void) { if (PENDING) g_tgTid = GetCurrentThreadId(); pump(); return o_tgt(); }
+static DWORD WINAPI h_tgt(void) { pump(); return o_tgt(); }
 
 // pump() est appelée à chaque fois (elle sort tout de suite hors du thread logique) pour
 // que la surveillance des options tourne aussi dans le lobby local
@@ -2184,7 +1863,7 @@ static DWORD WINAPI worker(LPVOID _) {
     install_spies();
     install_turn_trace();
     install_ai_input();
-    install_diag_v34();
+    install_ai_diag();
     install_banner();
     f_online      = (PFN_BOOL)VA(A_ONLINE);
     f_ishost      = (PFN_BOOL)VA(A_ISHOST);
@@ -2200,25 +1879,9 @@ static DWORD WINAPI worker(LPVOID _) {
     if (s1) patch_iat_slot(s1, h_xigs, (void**)&o_xigs);
     if (s2) patch_iat_slot(s2, h_tgt, (void**)&o_tgt);
     if (s3) patch_iat_slot(s3, h_rand, (void**)&o_rand);
-    logf_("WMD-Mod v73 actif (base=%08X, xinput=%d tgt=%d rand=%d qpc=%d). wmdmod.ini : detail log=%d, HostSteamID=%I64u, ForcerBoutonsIA=%d, IAPartagee=%d, TraducteurIA=%d",
+    logf_("WMD-Mod v74 actif (base=%08X, xinput=%d tgt=%d rand=%d qpc=%d). wmdmod.ini : detail log=%d, HostSteamID=%I64u, ForcerBoutonsIA=%d, IAPartagee=%d, TraducteurIA=%d",
           (unsigned)g_base, !!s1, !!s2, !!s3, !!s4, g_cfg.verbose, g_cfg.hostSteamId, g_cfg.forcePadAI, g_cfg.aiShared, g_cfg.swapMapper);
-    int p9 = 0, p8 = 0, p7 = 0, p6 = 0, p5 = 0, p4 = 0; int g_pending = 0;
-    for (;;) {
-        int k9 = KEYDOWN(g_cfg.keyAdd) & 0x8000, k8 = KEYDOWN(g_cfg.keyLobby) & 0x8000;
-        int k7 = KEYDOWN(g_cfg.keyDel) & 0x8000, k6 = KEYDOWN(g_cfg.keyOptions) & 0x8000, k5 = KEYDOWN(g_cfg.keyLevel) & 0x8000;
-        if (k9 && !p9) { InterlockedExchange(&g_reqAddCpu, 1); logf_("[clavier] F9 detecte"); }
-        if (k8 && !p8) { InterlockedExchange(&g_reqDump, 1); logf_("[clavier] F8 detecte"); }
-        if (k7 && !p7) { InterlockedExchange(&g_reqDel, 1); logf_("[clavier] F7 detecte"); }
-        if (k6 && !p6) { InterlockedExchange(&g_reqOpt, 1); logf_("[clavier] F6 detecte"); }
-        if (k5 && !p5) { InterlockedExchange(&g_reqLvl, 1); logf_("[clavier] F5 detecte"); }
-        // v58 : touche F3 supprimée (mode niveaux abandonné, g_showLevels reste 0)
-        // v61b : changement des textes du menu abandonné (demande utilisateur) : scan_labels non appelé
-        int k4 = KEYDOWN(g_cfg.keyTeams) & 0x8000;
-        if (k4 && !p4) { logf_("[clavier] F4 detecte"); dump_teams(); }   // lecture seule : OK hors thread logique
-        p4 = k4;
-        if (PENDING ? (++g_pending > 100) : (g_pending = 0)) { logf_("[diag] requete non traitee depuis 3s : pompe=%lu, xinput tid=%lu, logique=%lu (entre dans un lobby en ligne d'abord)", g_pumpCalls, g_xiTid, g_mainTid); g_pending = 0; }
-        p9 = k9; p8 = k8; p7 = k7; p6 = k6; p5 = k5; Sleep(30);
-    }
+    return 0;
 }
 
 BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID _) {
